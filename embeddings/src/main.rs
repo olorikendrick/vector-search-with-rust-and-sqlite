@@ -1,17 +1,17 @@
 // main.rs
 pub mod types;
 
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
 use crate::types::Embedding;
 use rusqlite::Connection;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let conn = Connection::open("embeddings.db")?;
+    let conn = Connection::open("./embeddings.db")?;
     let client = Embedding::create_client()?;
 
-    // Initialize database with vector support
+ 
     Embedding::init_db(&conn)?;
 
     println!("=== FAQ Search System ===");
@@ -50,8 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "optimize" => {
                 println!("Optimizing vector index...");
-                // Placeholder: implement Embedding::optimize_db(conn) when ready
-                // Embedding::optimize_db(&conn)?;
+                //          stub
                 println!("✓ Optimization complete (placeholder)");
             }
             "search" => {
@@ -59,7 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Usage: search <your question>");
                     continue;
                 }
-                search_faq(parts[1], &client, &conn).await?;
+                let query=parts[1].trim_matches('"').trim();
+                search_faq(query, &client, &conn).await?;
             }
             _ => {
                 // Treat any other input as a search query
@@ -141,7 +141,6 @@ async fn load_faq(
         }
     }
 
-    // Commit last Q&A pair
     if !current_question.is_empty() && !current_answer.is_empty() {
         let combined = format!("Q: {}\nA: {}", current_question, current_answer);
         let embedding = Embedding::new(combined, client).await?;

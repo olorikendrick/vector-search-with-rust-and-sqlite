@@ -1,7 +1,7 @@
 // src/types.rs
 
 use reqwest;
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
@@ -52,11 +52,11 @@ impl Embedding {
     }
 
     /// Initialize the database schema.
- pub fn init_db(conn: &Connection) -> SqlResult<()> {
+    pub fn init_db(conn: &Connection) -> SqlResult<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS embeddings (
                 id INTEGER PRIMARY KEY,
-                label TEXT NOT NULL,
+                label TEXT NOT NULL UNIQUE,
                 vector BLOB NOT NULL
             )",
             [],
@@ -72,7 +72,7 @@ impl Embedding {
         let bytes: &[u8] = bytemuck::cast_slice(&self.vector);
 
         conn.execute(
-            "INSERT INTO embeddings (label, vector) VALUES (?1, ?2)",
+            "INSERT  OR REPLACE INTO embeddings (label, vector) VALUES (?1, ?2)",
             params![&self.label, bytes],
         )?;
         Ok(())
@@ -87,7 +87,7 @@ impl Embedding {
             .query_map([], |row| {
                 let label: String = row.get(0)?;
                 let bytes: Vec<u8> = row.get(1)?;
-                
+
                 // bytemuck::cast_slice converts &[u8] back to &[f32] for computation
                 let stored: &[f32] = bytemuck::cast_slice(&bytes);
 
@@ -120,8 +120,7 @@ impl Embedding {
             }
         });
 
-        let url =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent";
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent";
 
         let res = client
             .post(url)
@@ -132,12 +131,7 @@ impl Embedding {
             .json::<GeminiResponse>()
             .await?;
 
-        Ok(res
-            .embedding
-            .values
-            .into_iter()
-            .map(|v| v as f32)
-            .collect())
+        Ok(res.embedding.values.into_iter().map(|v| v as f32).collect())
     }
 
     /// Convert multiple texts into vectors using Gemini batch embedding.
@@ -161,8 +155,7 @@ impl Embedding {
 
         let body = json!({ "requests": requests });
 
-        let url =
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents";
+        let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents";
 
         let res = client
             .post(url)
