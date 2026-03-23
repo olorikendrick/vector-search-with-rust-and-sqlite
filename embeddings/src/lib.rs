@@ -1,14 +1,152 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use crate::errors::AppError;
+
+pub mod errors;
+pub mod types;
+use crate::types::{Embedding};
+
+use rusqlite::Connection;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
+
+
+async fn search_faq(
+    query: &str,
+    client: &reqwest::Client,
+    conn: &Connection,
+) -> Result<(), AppError> {
+    println!("\nSearching for: \"{}\"", query);
+    println!("Generating embedding...");
+
+    let query_embedding = Embedding::new(query.to_string(), client).await?;
+    let results = query_embedding.search(conn, 3)?;
+
+    if results.is_empty() {
+        println!("No results found. Try loading the FAQ first with 'load' command.");
+        return Ok(());
+    }
+
+    println!("\n--- Top {} Results ---", results.len());
+    for (i, (label, distance)) in results.iter().enumerate() {
+        let similarity = 1.0 - distance;
+        println!("\n{}. [Similarity: {:.2}%]", i + 1, similarity * 100.0);
+        println!("   {}", label);
+        if similarity > 0.7 {
+            println!("   ✓ Strong match!");
+        }
+    }
+    println!();
+
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+async fn load_faq(
+    client: &reqwest::Client,
+    conn: &Connection,
+) -> Result<(), AppError> {
+    let file = File::open("./faq.txt")?;
+    let reader = BufReader::new(file);
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    let mut current_question = String::new();
+    let mut current_answer = String::new();
+    let mut count = 0;
+
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with("===") {
+            continue;
+        }
+
+        if trimmed.starts_with("Q: ") {
+            if !current_question.is_empty() && !current_answer.is_empty() {
+                let combined = format!("Q: {}\nA: {}", current_question, current_answer);
+                let embedding = Embedding::new(combined, client).await?;
+                embedding.commit(conn)?;
+                count += 1;
+                print!("\rEmbedded {} questions...", count);
+                io::stdout().flush()?;
+            }
+
+            current_question = trimmed.strip_prefix("Q: ").unwrap().to_string();
+            current_answer.clear();
+        } else if trimmed.starts_with("A: ") {
+            current_answer = trimmed.strip_prefix("A: ").unwrap().to_string();
+        } else if !current_answer.is_empty() {
+            current_answer.push('\n');
+            current_answer.push_str(trimmed);
+        }
     }
+
+    if !current_question.is_empty() && !current_answer.is_empty() {
+        let combined = format!("Q: {}\nA: {}", current_question, current_answer);
+        let embedding = Embedding::new(combined, client).await?;
+        embedding.commit(conn)?;
+        count += 1;
+    }
+
+    println!("\n✓ Total embedded: {} Q&A pairs", count);
+    Ok(())
+}
+
+
+pub async fn run()->Result<(),AppError>{
+     let conn = Connection::open("./embeddings.db")?;
+    let client = Embedding::create_client()?;
+
+    Embedding::init_db(&conn)?;
+
+    println!("=== FAQ Search System ===");
+    println!("Commands:");
+    println!("  search <query>  - Search for similar questions");
+    println!("  load            - Load FAQ from faq.txt");
+    println!("  optimize        - Optimize vector index for faster search");
+    println!("  quit            - Exit program");
+    println!();
+
+    loop {
+        print!("> ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let command = parts[0];
+
+        match command {
+            "quit" | "exit" | "q" => {
+                println!("Goodbye!");
+                break;
+            }
+            "load" => {
+                println!("Loading FAQ...");
+                load_faq(&client, &conn).await?;
+                println!("✓ FAQ loaded successfully!");
+                println!("  Tip: Run 'optimize' to speed up searches");
+            }
+            "optimize" => {
+                println!("Optimizing vector index...");
+                println!("✓ Optimization complete (placeholder)");
+            }
+            "search" => {
+                if parts.len() < 2 {
+                    println!("Usage: search <your question>");
+                    continue;
+                }
+                let query = parts[1].trim_matches('"').trim();
+                search_faq(query, &client, &conn).await?;
+            }
+            _ => {
+                search_faq(input, &client, &conn).await?;
+            }
+        }
+    }
+
+    Ok(())
 }

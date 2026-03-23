@@ -1,161 +1,51 @@
 # Refactoring
 
-In the last chapter we managed to cobble up something working from scratch, but 
+In the last chapter we managed to cobble up something working from scratch, but
 it's not enough to just work — we must make it better.
 
-In this chapter, we're going to poke some holes in our previous setup and look 
+In this chapter, we're going to poke some holes in our previous setup and look
 at how we can make it more secure and robust.
 
-Let's start with our method of creating embeddings. As of now we're tied to 
-using Gemini for generating embeddings. With the host of different embedding 
-models and providers out there, there's no reason we should handicap ourselves 
-that way — let's change that.
+Let's start with error handling. As of now, every little error crashes our program
+and the error messages returned are quite vague.
 
-## Introducing Rig
-
-Rig is the go-to crate for dealing with LLMs and agents in Rust. From its 
-official docs:
-
-> A modular, scalable library for building LLM-powered applications. 
-> Production-ready and open source.
-
-Our current approach for generating vectors looks like this:
+We used
 ```rust
-{{#include ../embeddings/src/types.rs:8:29}}
-```
-```rust
-{{#include ../embeddings/src/types.rs:109:136}}
+Result<T, Box<dyn std::error::Error>>
 ```
 
-Our only way of converting text to vectors is by making an HTTP request to a 
-Gemini endpoint and deserializing the response into a Gemini-specific struct — 
-Gemini-specific being the problem.
+to propagate errors upwards from each of our functions. This is convenient, but
+it collapses every error into one generic, vague type which offers little
+information. For example, if we have a missing API key in our environment
+variables, the program exits with a generic error message as shown below:
 
-Rig provides a unified abstraction over multiple embedding providers and models 
-through its `EmbeddingModel` trait:
+![Error Example](img_7.png)
+
+Looking at our setup we can identify several distinct boundaries which might fail:
+
+- **IO** — reading the FAQ might fail due to a missing file or missing permissions
+- **Network** — to transform each of our texts to vectors we make an HTTP request to the Gemini API
+- **Database** — database operations might fail due to a missing database or missing permissions
+- **Env** — our API key for Gemini is read from environment variables
+- **Parse** — the FAQ file or Gemini API response might not match the expected format
+
+To make our program better we need to provide explicit error messages at each of
+these boundaries. We do this by defining a custom error type:
 ```rust
-pub trait EmbeddingModel {
-    fn embed_text(&self, text: &str) 
-        -> impl Future<Output = Result<Embedding, EmbeddingError>>;
-    
-    fn embed_texts(&self, texts: impl IntoIterator<Item = String>) 
-        -> impl Future<Output = Result<Vec<Embedding>, EmbeddingError>>;
-}
+{{#include ../embeddings/src/errors.rs}}
 ```
 
-Any provider that implements this trait — OpenAI, Gemini, Cohere, whatever — 
-works identically from our code's perspective. To switch from Gemini to OpenAI, 
-you change one line. That's the abstraction we want.
+We explicitly define an enum whose variants each wrap a specific error type,
+giving us precise information about what went wrong and where. The `impl_from!`
+macro derives `From` trait implementations for each variant, allowing the `?`
+operator to automatically convert errors into the appropriate `AppError` variant
+without any manual casting.
 
-Better yet — we don't need our own `Embedding` struct at all. Rig ships with 
-one:
+What's left is to replace every `Box<dyn std::error::Error>` in our codebase
+with `AppError`:
 ```rust
-pub struct Embedding {
-    pub document: String,
-    pub vec: Vec<f64>,
-}
+{{#include ../embeddings/src/types.rs}}
 ```
-
-Compare that to what we had:
 ```rust
-pub struct Embedding {
-    pub label: String,
-    pub vector: Vec<f32>,
-}
-
-#[derive(Deserialize)]
-struct GeminiResponse {
-    embedding: EmbeddingValues,
-}
-
-#[derive(Deserialize)]
-struct BatchGeminiResponse {
-    embeddings: Vec<EmbeddingValues>,
-}
-
-#[derive(Deserialize)]
-struct EmbeddingValues {
-    values: Vec<f64>,
-}
+{{#include ../embeddings/src/main.rs}}
 ```
-
-All of that — plus `vectorize()`, `batch_vectorize()`, `new()`, `batch_new()`, 
-and `create_client()` — is now handled by Rig. We just delete it.
-
-## The Refactored types.rs
-
-What survives from Chapter 2 is exactly what should survive — the logic that 
-is genuinely ours: storing vectors, retrieving them, and computing distance.
-```rust
-{{#include ../refactored/src/types.rs}}
-```
-
-`types.rs` went from ~180 lines to ~60. Every deleted line was boilerplate 
-that Rig now owns. What remains is focused and clear.
-
-Two things worth noting:
-
-The functions are now standalone rather than methods on an `Embedding` impl 
-block — since we're using Rig's `Embedding` type directly, there's no struct 
-of our own to hang methods on.
-
-The vectors are now `f64` throughout, matching Rig's `Embedding.vec` type. 
-In Chapter 2 we used `f32` — the cast on the way in and out of SQLite is still 
-there but it's consolidated.
-
-## The Refactored main.rs
-
-The other big change is in `main.rs` — we now pass a `model` around instead 
-of a `client`:
-```rust
-{{#include ../refactored/src/main.rs}}
-```
-
-In Chapter 2, `main` created a reqwest client and passed it everywhere. 
-Functions called `Embedding::new()` which called `vectorize()` which made the 
-HTTP request. The embedding logic was buried three layers deep.
-
-Now `main` creates a model and passes it directly to `load_faq` and 
-`search_faq`. Those functions call `model.embed_text()` — one call, no layers.
-
-And if you want to switch providers:
-```rust
-// Gemini
-let client = gemini::Client::from_env();
-let model = client.embedding_model(gemini::GEMINI_EMBEDDING_001);
-
-// OpenAI — swap these two lines, everything else stays the same
-let client = openai::Client::from_env();
-let model = client.embedding_model(openai::TEXT_EMBEDDING_ADA_002);
-```
-
-That's it. The rest of the codebase doesn't change.
-
-## What We Deleted
-
-It's worth being explicit about what's gone:
-
-| Removed | Why |
-|---|---|
-| `GeminiResponse` struct | Rig handles deserialization |
-| `BatchGeminiResponse` struct | Rig handles deserialization |
-| `EmbeddingValues` struct | Rig handles deserialization |
-| `create_client()` | Rig manages the HTTP client |
-| `vectorize()` | Replaced by `model.embed_text()` |
-| `batch_vectorize()` | Replaced by `model.embed_texts()` |
-| `new()` | No longer needed |
-| `batch_new()` | No longer needed |
-| `Embedding` struct | Using `rig::embeddings::Embedding` |
-| `reqwest` dependency | Rig handles HTTP |
-| `serde` / `serde_json` dependencies | Rig handles serialization |
-
-Good refactoring is measured in deletions as much as additions. We deleted 
-~120 lines and the program does exactly the same thing — just with less to 
-maintain and no provider lock-in.
-
-## What's Next
-
-Our search logic is solid and our embedding layer is now clean and swappable. 
-But we're still missing proper error handling — if anything goes wrong, 
-we crash. In the next chapter we'll fix that, giving our program the robustness 
-it needs before we wire it up to a Telegram bot.

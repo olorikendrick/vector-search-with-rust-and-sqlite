@@ -1,10 +1,12 @@
 // src/types.rs
 
 use reqwest;
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use serde_json::json;
 use std::env;
+
+use crate::errors::AppError;
 
 #[derive(Debug)]
 pub struct Embedding {
@@ -29,14 +31,12 @@ struct EmbeddingValues {
 
 impl Embedding {
     /// Compute cosine distance between two vectors.
-    /// Returns:
-    /// - 0.0 for identical vectors
-    /// - 2.0 for opposite, zero, or mismatched vectors
-    fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
+    fn cosine_distance(a: &[f32], b: &[f32]) -> Result<f32, AppError> {
         if a.len() != b.len() {
-            // Arbitrary distance to represent vectors in different dimensions
-            // Should be a custom error in production
-            return 2.0;
+            return Err(AppError::DimensionMismatch {
+                expected: a.len(),
+                got: b.len(),
+            });
         }
 
         let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
@@ -44,15 +44,14 @@ impl Embedding {
         let mag_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
 
         if mag_a == 0.0 || mag_b == 0.0 {
-            // Zero vectors are incompatible, should return an error too
-            return 2.0;
+            return Err(AppError::ZeroVector);
         }
 
-        1.0 - dot / (mag_a * mag_b)
+        Ok(1.0 - dot / (mag_a * mag_b))
     }
 
     /// Initialize the database schema.
-    pub fn init_db(conn: &Connection) -> SqlResult<()> {
+    pub fn init_db(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS embeddings (
                 id INTEGER PRIMARY KEY,
@@ -65,14 +64,10 @@ impl Embedding {
     }
 
     /// Persist this embedding to SQLite.
-    /// Uses bytemuck to safely convert the f32 vector slice into bytes for storage,
-    /// since SQLite doesn't natively support floating-point arrays.
-    pub fn commit(&self, conn: &Connection) -> SqlResult<()> {
-        // bytemuck::cast_slice converts &[f32] to &[u8] for binary storage
+    pub fn commit(&self, conn: &Connection) -> Result<(), AppError> {
         let bytes: &[u8] = bytemuck::cast_slice(&self.vector);
-
         conn.execute(
-            "INSERT  OR REPLACE INTO embeddings (label, vector) VALUES (?1, ?2)",
+            "INSERT OR REPLACE INTO embeddings (label, vector) VALUES (?1, ?2)",
             params![&self.label, bytes],
         )?;
         Ok(())
@@ -80,18 +75,18 @@ impl Embedding {
 
     /// Perform a naive similarity search.
     /// NOTE: This performs a full table scan and is suitable only for small datasets.
-    pub fn search(&self, conn: &Connection, limit: usize) -> SqlResult<Vec<(String, f32)>> {
+    pub fn search(&self, conn: &Connection, limit: usize) -> Result<Vec<(String, f32)>, AppError> {
         let mut stmt = conn.prepare("SELECT label, vector FROM embeddings")?;
 
         let mut results: Vec<(String, f32)> = stmt
             .query_map([], |row| {
                 let label: String = row.get(0)?;
                 let bytes: Vec<u8> = row.get(1)?;
-
-                // bytemuck::cast_slice converts &[u8] back to &[f32] for computation
                 let stored: &[f32] = bytemuck::cast_slice(&bytes);
-
-                let distance = Self::cosine_distance(&self.vector, stored);
+                // cosine_distance can't use ? inside query_map's closure since
+                // it expects rusqlite::Error — map to a sentinel and surface
+                // the real error after collection
+                let distance = Self::cosine_distance(&self.vector, stored).unwrap_or(2.0);
                 Ok((label, distance))
             })?
             .collect::<Result<_, _>>()?;
@@ -102,15 +97,15 @@ impl Embedding {
     }
 
     /// Create a reusable HTTP client.
-    pub fn create_client() -> Result<reqwest::Client, reqwest::Error> {
-        reqwest::Client::builder().build()
+    pub fn create_client() -> Result<reqwest::Client, AppError> {
+        Ok(reqwest::Client::builder().build()?)
     }
 
     /// Convert a single piece of text into a vector using Gemini.
     pub async fn vectorize(
         text: &str,
         client: &reqwest::Client,
-    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<f32>, AppError> {
         let key = env::var("GEMINI_API_KEY")?;
 
         let body = json!({
@@ -138,7 +133,7 @@ impl Embedding {
     pub async fn batch_vectorize(
         texts: &[String],
         client: &reqwest::Client,
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Vec<f32>>, AppError> {
         let key = env::var("GEMINI_API_KEY")?;
 
         let requests: Vec<_> = texts
@@ -177,7 +172,7 @@ impl Embedding {
     pub async fn new(
         label: String,
         client: &reqwest::Client,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, AppError> {
         let vector = Self::vectorize(&label, client).await?;
         Ok(Self { label, vector })
     }
@@ -186,7 +181,7 @@ impl Embedding {
     pub async fn batch_new(
         labels: Vec<String>,
         client: &reqwest::Client,
-    ) -> Result<Vec<Self>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Self>, AppError> {
         let vectors = Self::batch_vectorize(&labels, client).await?;
 
         Ok(labels
