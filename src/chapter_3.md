@@ -42,10 +42,18 @@ operator to automatically convert errors into the appropriate `AppError` variant
 without any manual casting.
 
 What's left is to replace every `Box<dyn std::error::Error>` in our codebase
-with `AppError`:
+with `AppError`. We also take this opportunity to move our embedding logic into
+`lib.rs`, separating it from the entry point:
 ```rust
 {{#include ../embeddings/src/types.rs}}
 ```
+```rust
+{{#include ../embeddings/src/lib.rs}}
+```
+
+`main.rs` is now responsible for one thing — running the program and surfacing
+any errors to the user via `Display`, rather than letting Rust's default `Debug`
+output bypass our custom messages:
 ```rust
 {{#include ../embeddings/src/main.rs}}
 ```
