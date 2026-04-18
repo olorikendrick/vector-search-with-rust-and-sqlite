@@ -51,7 +51,7 @@ async fn load_faq(
     let mut count = 0;
 
     for line in reader.lines() {
-        let line = line?;
+        let line = line.map_err(|e|AppError::ParseError(e.to_string()))?;
         let trimmed = line.trim();
 
         if trimmed.is_empty() || trimmed.starts_with("===") {

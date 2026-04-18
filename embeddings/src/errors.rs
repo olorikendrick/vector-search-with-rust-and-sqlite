@@ -50,6 +50,7 @@ AppError::ZeroVector => write!(f, "Cannot compute similarity for a zero vector")
     }
 }
 
+impl std::error::Error for AppError {}
 macro_rules! impl_from {
     ($variant:ident, $error:ty) => {
         impl From<$error> for AppError {
